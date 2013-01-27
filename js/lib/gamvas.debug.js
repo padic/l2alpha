@@ -78,10 +78,12 @@
  *
  */
 gamvas = {
+    _layerSort: null,
     _canvas: null,
     _context2D: null,
     _world: null,
     _usePhys: false,
+    _doSleep: true,
     /*
      * Variable: baseURL
      *
@@ -114,12 +116,13 @@ gamvas = {
      * > });
      */
     start: function(canvasid, usePhysics, doSleep) {
-        if (gamvas.isSet(usePhysics)) {
+        if ( (gamvas.isSet(usePhysics)) && (usePhysics) ) {
             gamvas._usePhys = usePhysics;
             var slp = doSleep;
             if (!gamvas.isSet(doSleep)) {
                 slp = true;
             }
+            gamvas._doSleep = slp;
             gamvas.physics.resetWorld(0, 9.8, slp);
         }
 
@@ -131,6 +134,12 @@ gamvas = {
 
         gamvas._canvas.oncontextmenu=function() {return false;};
         gamvas._context2D = gamvas._canvas.getContext("2d");
+
+	if (gamvas.config.reverseLayerOrder) {
+        gamvas._layerSort = function(a,b) {return (b.layer - a.layer);};
+	} else {
+        gamvas._layerSort = function(a,b) {return (a.layer - b.layer);};
+	}
 
         window.requestAnimationFrame = (function(cb) {
             return window.requestAnimationFrame ||
@@ -401,35 +410,66 @@ gamvas.baseURL = tmpScr[tmpScr.length - 1].src.replace(/\\/g, '/').replace(/\/[^
  * Several userconfigurable variables
  */
 gamvas.config = {
-        /*
-         * Variable: preventKeyEvents
-         *
-         * Capture the whole documents key events?
-         *
-         * If true, every key event on the page will be handled by gamvas.
-	 * This disables scrolling with cursor keys and other keyboard shortcuts.
-	 * When false, only keys that are explicitly handled by the running game
-	 * are not given to the browser, everything else is put through
-         *
-         * Default:
-         * true
-         */
-	preventKeyEvents: true,
+    /*
+     * Variable: preventKeyEvents
+     *
+     * Capture the whole documents key events?
+     *
+     * If true, every key event on the page will be handled by gamvas.
+     * This disables scrolling with cursor keys and other keyboard shortcuts.
+     * When false, only keys that are explicitly handled by the running game
+     * are not given to the browser, everything else is put through
+     *
+     * Default:
+     * false
+     */
+	preventKeyEvents: false,
 
-        /*
-         * Variable: preventMouseEvents
-         *
-         * Capture the whole documents mouse events?
-         *
-         * If true, every mouse event on the page will be handled by gamvas.
+    /*
+     * Variable: preventMouseEvents
+     *
+     * Capture the whole documents mouse events?
+     *
+     * If true, every mouse event on the page will be handled by gamvas.
 	 * You can not select input fields, or click on the scrollbar.
 	 * When false, only if the event handler like for example <gamvas.actor.onKeyDown>
 	 * returns false, the mouse event will not be put through to the browser.
-         *
-         * Default:
-         * true
-         */
-	preventMouseEvents: true,
+     *
+     * Default:
+     * false
+     */
+	preventMouseEvents: false,
+
+    /*
+     * Variable: worldPerState
+     *
+     * Use one physics world per game state?
+     *
+     * If true, every game state will have its own physics world,
+     * compared to one physics world for the full game.
+     *
+     * Default:
+     * true
+     */
+	worldPerState: true,
+
+	/*
+	 * Variable: reverseLayerOrder
+	 *
+	 * Reverse layer sorting
+	 *
+	 * The first versions of gamvas had a error, detected by forum user bogdanaslt, where the value of <gamvas.actor.layer>
+	 * was the wrong way, so a background layer had to have a higher layer value then a foreground object to be rendered
+	 * below the foreground object.
+	 *
+	 * If you have used layers before introduction of this fix (0.8.3), you have to options, rearrange your code to
+	 * work with the correct layering (as in layer 0 = background, layer 1 = before background, or you have to set this
+	 * variable to true *BEFORE* starting gamvas to use the old - wrong - sorting.
+	 *
+	 * Default:
+	 * false
+	 */
+	reverseLayerOrder: false
 };
 /**
  * Copyright (C) 2012 Heiko Irrgang <hi@93i.de>
@@ -1827,6 +1867,8 @@ gamvas.mouse = {
 gamvas.State = gamvas.Class.extend({
         create: function(name) {
             this._isInitialized = false;
+            this._pixelPerMeter = 64;
+            this._removeQueue = [];
 
             /*
              * Variable: disableCamera
@@ -1888,6 +1930,8 @@ gamvas.State = gamvas.Class.extend({
             this.actors = [];
             this.eventActors = [];
             this._afiles = [];
+            this._doSleep = true;
+            this._world = null;
 
             /*
              * Variable: resource
@@ -2156,7 +2200,7 @@ gamvas.State = gamvas.Class.extend({
          * >         if (keyCode == gamvas.key.SPACE) {
          * >             this.firePlayerGun();
          * >         }
-	 * >         return gamvas.key.exitEvent();
+         * >         return gamvas.key.exitEvent();
          * >     }
          * > });
          */
@@ -2257,9 +2301,9 @@ gamvas.State = gamvas.Class.extend({
          * Returns:
          *
          * true or false, depending if it handled the event or not
-	 *
-	 * See:
-	 *
+         *
+         * See:
+         *
          * <gamvas.mouse.exitEvent>
          *
          * Example:
@@ -2267,7 +2311,7 @@ gamvas.State = gamvas.Class.extend({
          * > myState = gamvas.State.extend({
          * >     onMouseMove: function(x, y) {
          * >         this.mousePointerImage.setPosition(x, y);
-	 * >         return gamvas.mouse.exitEvent();
+         * >         return gamvas.mouse.exitEvent();
          * >     }
          * > });
          */
@@ -2301,6 +2345,22 @@ gamvas.State = gamvas.Class.extend({
          */
         addActor: function(act) {
             this.actors[act.name] = act;
+        },
+
+        /*
+         * Function: removeActor
+         *
+         * Description:
+         *
+         * Add a <gamvas.Actor> to the state.
+         * Actors added to a state are drawn automatically.
+         *
+         * Parameters:
+         *
+         * act - a <gamvas.Actor> object or a string with the actor name
+         */
+        removeActor: function(act) {
+            this._removeQueue.push(act);
         },
 
         /*
@@ -2413,9 +2473,61 @@ gamvas.State = gamvas.Class.extend({
             for (var i in this.actors) {
                 sorted.push(this.actors[i]);
             }
-            sorted.sort(function(a,b) {return (b.layer - a.layer);});
+            sorted.sort(gamvas._layerSort);
             return sorted;
-        }
+        },
+
+	cleanUp: function() {
+		if (this._removeQueue.length < 1) {
+			return;
+		}
+
+		var world = gamvas.physics.getWorld();
+		var removeNames = [];
+		for (var i in this._removeQueue) {
+			var toremove = null;
+			if (typeof this._removeQueue[i] == 'string') {
+				toremove = this._removeQueue[i];
+			} else {
+				toremove = this._removeQueue[i].name;
+			}
+			removeNames.push(toremove);
+		}
+		var newActors = [];
+		var deleteObj = [];
+		for (var i in this.actors) {
+			if (removeNames.indexOf(i) != -1) {
+				if (this.actors[i].usePhysics) {
+					world.DestroyBody(this.actors[i].body);
+					this.actors[i].body = null;
+				}
+				deleteObj.push(this.actors[i]);
+			} else {
+				newActors[i] = this.actors[i];
+			}
+		}
+		this.actors = newActors;
+
+		var newEventActors = [];
+		for (var i in this.eventActors) {
+			if (removeNames.indexOf(i) != -1) {
+				if ( (this.eventActors[i].usePhysics) && (this.eventActors[i].body !== null) ) {
+					world.DestroyBody(this.eventActors[i].body);
+				}
+				if (deleteObj.indexOf(this.eventActors[i]) < 0) {
+					delete(this.eventActors[i]);
+				}
+			} else {
+				newEventActors[i] = this.eventActors[i];
+			}
+		}
+		this.eventActors = newEventActors;
+
+		for (var i in deleteObj) {
+			delete deleteObj[i];
+		}
+		this._removeQueue = [];
+	}
 });
 /**
  * Copyright (C) 2012 Heiko Irrgang <hi@93i.de>
@@ -2449,6 +2561,7 @@ gamvas.State = gamvas.Class.extend({
 gamvas.state = {
     _states: [],
     _currentState: null,
+    _firstState: true,
 
     /*
      * Function: addState
@@ -2472,6 +2585,12 @@ gamvas.state = {
      */
     addState: function(state) {
         gamvas.state._states[state.name] = state;
+        if ( (gamvas._usePhys) && (state.world === null) ) {
+            var oldState = gamvas.state._currentState;
+            gamvas.state._currentState = state.name;
+            gamvas.physics.resetWorld(0, 9.8, gamvas._doSleep);
+            gamvas.state._currentState = oldState;
+        }
         if (gamvas.state._currentState === null) {
             gamvas.state._currentState = state.name;
         }
@@ -2490,12 +2609,14 @@ gamvas.state = {
      */
     setState: function(stateName) {
         if (gamvas.isSet(gamvas.state._states[stateName])) {
-            if (gamvas.state._currentState !== null) {
+            if ( (!gamvas.state._firstState) && (gamvas.state._currentState !== null) ) {
                 var cur = gamvas.state.getCurrentState();
                 if (cur) {
                     cur.leave();
                 }
-            }
+            } else {
+		    gamvas.state._firstState = false;
+	    }
 
             var st = gamvas.state._states[stateName];
             gamvas.state._currentState = stateName;
@@ -2516,7 +2637,7 @@ gamvas.state = {
      *
      * Example:
      *
-     * > var cs = gamvas.getCurrentState();
+     * > var cs = gamvas.state.getCurrentState();
      * > console.log("current state is: " + cs.name);
      */
     getCurrentState: function() {
@@ -2535,16 +2656,18 @@ gamvas.state = {
             var world = null;
             if ( (gamvas._usePhys) && (ready) ) {
                 world = gamvas.physics.getWorld();
-                world.Step(t, gamvas.physics.velocityIterations, gamvas.physics.positionIterations);
-                var allBd = world.GetBodyList();
-                var i = null;
-                var b = null;
-                var a = null;
-                for (i = world.m_bodyList; i; i = i.m_next) {
-                    a = i.GetUserData();
-                    if (a !== null) {
-                        if (a.type == 'actor') {
-                            a.data.updatePhysics();
+                if (world !== null) {
+                    world.Step(t, gamvas.physics.velocityIterations, gamvas.physics.positionIterations);
+                    var allBd = world.GetBodyList();
+                    var i = null;
+                    var b = null;
+                    var a = null;
+                    for (i = world.m_bodyList; i; i = i.m_next) {
+                        a = i.GetUserData();
+                        if (a !== null) {
+                            if (a.type == 'actor') {
+                                a.data.updatePhysics();
+                            }
                         }
                     }
                 }
@@ -2575,8 +2698,6 @@ gamvas.state = {
                     }
                 }
                 cur.draw(t);
-            } else {
-                cur.loading(t);
             }
             if (useCam) cur.camera.stop();
             if (ready) {
@@ -2586,10 +2707,14 @@ gamvas.state = {
                     }
                 }
                 cur.postDraw(t);
-            }
-            if ( (gamvas._usePhys) && (world) ) {
-                world.ClearForces();
-            }
+            } else {
+                cur.loading(t);
+	    }
+            // if ( (gamvas._usePhys) && (world) ) {
+	    	// why did i call this?
+                // world.ClearForces();
+            // }
+	    cur.cleanUp();
         }
     },
 
@@ -2600,7 +2725,6 @@ gamvas.state = {
             for (var i in cur.eventActors) {
                 cur.eventActors[i].onKeyDown(ev.keyCode, ev.charCode, ev);
             }
-	    console.log('return on state');
             return cur.onKeyDown(ev.keyCode, ev.charCode, ev);
         }
 	return gamvas.key.exitEvent();
@@ -2619,9 +2743,6 @@ gamvas.state = {
     },
 
     onMouseDown: function(ev) {
-        if (ev.preventDefault) {
-            ev.preventDefault();
-        }
         gamvas.key.setPressed(ev.button, true);
         var cur = gamvas.state.getCurrentState();
         if (cur) {
@@ -2639,9 +2760,6 @@ gamvas.state = {
     },
 
     onMouseUp: function(ev) {
-        if (ev.preventDefault) {
-            ev.preventDefault();
-        }
         gamvas.key.setPressed(ev.button, false);
         var cur = gamvas.state.getCurrentState();
         if (cur) {
@@ -2659,9 +2777,6 @@ gamvas.state = {
     },
 
     onMouseMove: function(ev) {
-        if (ev.preventDefault) {
-            ev.preventDefault();
-        }
         gamvas.mouse.setPosition(ev.pageX, ev.pageY);
         var cur = gamvas.state.getCurrentState();
         if (cur) {
@@ -3160,7 +3275,7 @@ window.onfocus = gamvas.screen.resume;
  * See:
  * <gamvas.Actor>
  */
-gamvas.Image = function(file, x, y, cx, cy, ctx) {
+gamvas.Image = function(file, x, y, cx, cy) {
     this.image = file;
     this.position = new gamvas.Vector2D((x)?x:0, (y)?y:0);
     this.center = new gamvas.Vector2D((cx)?cx:0, (cy)?cy:0);
@@ -3809,7 +3924,7 @@ gamvas.Animation = gamvas.Class.extend({
         c.save();
         c.translate(x, y);
         c.rotate(rot);
-        c.scale(tScale, this.scaleFactor2);
+        c.scale(tScale, tScale);
         c.drawImage(this.sprite, px, py, this.width, this.height, -tOffX, -tOffY, this.width, this.height);
         c.restore();
     },
@@ -4136,13 +4251,21 @@ gamvas.physics = {
      * > gamvas.resetWorld();
      */
     resetWorld: function(gravx, gravy, slp, listener) {
-        var doSleep = (typeof slp == 'undefined' ) ? true : slp;
-        var gx = (gravx) ? gravx : 0;
-        var gy = (gravy) ? gravy : 9.8;
-        gamvas._doSleep = doSleep;
-        gamvas._world = new Box2D.Dynamics.b2World(new Box2D.Common.Math.b2Vec2(gx, gy), doSleep);
-        var l = (listener) ? listener : new Box2D.Dynamics.b2ContactListener();
-        gamvas._world.SetContactListener(l);
+        var doSleep = ( (gamvas.isSet(slp)) && (slp) ) ? true : slp;
+        var gx = (gamvas.isSet(gravx)) ? gravx : 0;
+        var gy = (gamvas.isSet(gravy)) ? gravy : 9.8;
+        if (gamvas.config.worldPerState) {
+            var cs = gamvas.state.getCurrentState();
+            cs._doSleep = doSleep;
+            cs._world = new Box2D.Dynamics.b2World(new Box2D.Common.Math.b2Vec2(gx, gy), doSleep);
+        } else {
+            gamvas._doSleep = doSleep;
+            gamvas._world = new Box2D.Dynamics.b2World(new Box2D.Common.Math.b2Vec2(gx, gy), doSleep);
+        }
+        this._debugDrawer = null;
+        var l = (gamvas.isSet(listener)) ? listener : new Box2D.Dynamics.b2ContactListener();
+        var w = gamvas.physics.getWorld();
+        w.SetContactListener(l);
     },
 
     /*
@@ -4163,7 +4286,12 @@ gamvas.physics = {
      * http://www.box2d.org/
      */
     getWorld: function() {
-        return gamvas._world;
+        if (gamvas.config.worldPerState) {
+            var cs = gamvas.state.getCurrentState();
+            return cs._world;
+        } else {
+            return gamvas._world;
+        }
     }
 };
 /**
@@ -4758,7 +4886,7 @@ gamvas.ActorState = gamvas.Class.extend({
  * >         var st = gamvas.state.getCurrentState();
  * >         // load our animation with 64x64 pixels per frames, 10 frames
  * >         // playing with 20 frames per second
- * >         this.setFile(st.resource.getImage('anim.png', 64, 64, 10, 20));
+ * >         this.setFile(st.resource.getImage('anim.png'), 64, 64, 10, 20);
  * >         // get default actor state
  * >         var defState = this.myActor.getCurrentState();
  * >         // install brain, move 10 pixels per second to the right
@@ -4892,6 +5020,11 @@ gamvas.Actor = gamvas.Class.extend({
          * Variable: layer
          *
          * Integer value used for z-sorting on automatic draw through <gamvas.State.addActor>
+	 *
+	 * Note:
+	 *
+	 * Versions prior 0.8.3 used the layer value in the wrong direction, if you have used
+	 * gamvas before this version, see <gamvas.config.reverseLayerOrder>
          *
          * Default:
          * 0
@@ -4971,7 +5104,7 @@ gamvas.Actor = gamvas.Class.extend({
      * >          this.actor.move(100*t, 0);
      * >     },
      * >     onKeyUp: function(keyCode) {
-     * >         if ( (keyCode = gamvas.key.RIGHT) || (keyCode = gamvas.key.LEFT) ) {
+     * >         if ( (keyCode == gamvas.key.RIGHT) || (keyCode = gamvas.key.LEFT) ) {
      * >             this.actor.setState('walking');
      * >         }
      * >     }
@@ -5360,9 +5493,10 @@ gamvas.Actor = gamvas.Class.extend({
      * http://en.wikipedia.org/wiki/Radians
      */
     setRotation: function(r) {
-        this.rotation = r;
         if (this.usePhysics) {
             this.body.SetAngle(r);
+        } else {
+            this.rotation = r;
         }
     },
 
@@ -5383,7 +5517,11 @@ gamvas.Actor = gamvas.Class.extend({
      * http://en.wikipedia.org/wiki/Radians
      */
     rotate: function(r) {
-        this.rotation += r;
+        if (this.usePhysics) {
+            this.body.SetAngle(this.body.GetAngle()+r);
+        } else {
+            this.rotation += r;
+        }
     },
 
     /*
@@ -5402,10 +5540,11 @@ gamvas.Actor = gamvas.Class.extend({
      * <gamvas.Actor.move>
      */
     setPosition: function(x, y) {
-        this.position.x = x;
-        this.position.y = y;
         if (this.usePhysics) {
             this.body.SetPosition(new Box2D.Common.Math.b2Vec2(x/gamvas.physics.pixelsPerMeter, y/gamvas.physics.pixelsPerMeter));
+        } else {
+            this.position.x = x;
+            this.position.y = y;
         }
     },
 
@@ -5425,8 +5564,13 @@ gamvas.Actor = gamvas.Class.extend({
      * <gamvas.Actor.setPosition>
      */
     move: function(x, y) {
-        this.position.x += x;
-        this.position.y += y;
+        if (this.usePhysics) {
+            var p = this.body.GetPosition();
+            this.body.SetPosition(new Box2D.Common.Math.b2Vec2(p.x+(x/gamvas.physics.pixelsPerMeter), p.y+(y/gamvas.physics.pixelsPerMeter)));
+        } else {
+            this.position.x += x;
+            this.position.y += y;
+        }
     },
 
     /*
@@ -5477,6 +5621,34 @@ gamvas.Actor = gamvas.Class.extend({
      */
     scale: function(s) {
         this.scaleFactor += s;
+    },
+
+    /*
+     * Function: setLinearDamping
+     *
+     * Description:
+     *
+     * Sets the linear damping of the physics object.
+     *
+     * This means, the higher the value, the more will
+     * the object be slowed down while simply 'rolling along'
+     */
+    setLinearDamping: function(d) {
+        this.body.SetLinearDamping(d);
+    },
+
+    /*
+     * Function: setAngularDamping
+     *
+     * Description:
+     *
+     * Sets the angular damping of the physics object.
+     *
+     * A angular damping slows down the rotation of a object
+     * over time while no other forces are having impact on it
+     */
+    setAngularDamping: function(d) {
+        this.body.SetAngularDamping(d);
     },
 
     /*
@@ -5549,7 +5721,7 @@ gamvas.Actor = gamvas.Class.extend({
      * >     create: function(name, x, y) {
      * >         this._super(name, x,, y);
      * >         var st = gamvas.state.getCurrentState();
-     * >         this.setFile(st.resource.getImage('anim.png', 64, 64, 10, 20));
+     * >         this.setFile(st.resource.getImage('anim.png'), 64, 64, 10, 20);
      * >     }
      * > });
      */
